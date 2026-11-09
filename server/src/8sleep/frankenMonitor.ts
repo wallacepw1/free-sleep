@@ -91,6 +91,9 @@ export class FrankenMonitor {
       try {
         if (!this.deviceStatus) {
           const initialStatus = await callFranken((session: Franken) => session.getDeviceStatus(false));
+          // Pod 3 is the identified cover without side taps, so it uses the slow poll.
+          // Any other string, including "Version not found", keeps gesture reads.
+          // This hub's beta cover has taps and must not be relabeled or slowed as Pod 3.
           const gesturesSupported = initialStatus.coverVersion !== Version.Pod3;
           waitTime = gesturesSupported ? 2_000 : 60_000;
           if (gesturesSupported) {

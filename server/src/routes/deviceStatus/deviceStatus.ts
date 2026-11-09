@@ -41,14 +41,21 @@ router.post('/deviceStatus', async (req: Request, res: Response) => {
     return;
   }
 
+  let franken;
   try {
-    await connectFranken({ connectBudgetMs: FRANKEN_REQUEST_CONNECT_BUDGET_MS });
+    franken = await connectFranken({ connectBudgetMs: FRANKEN_REQUEST_CONNECT_BUDGET_MS });
   } catch (error) {
     if (error instanceof FrankenRequestConnectBudgetError) {
       res.status(503).json({ error: error.message });
       return;
     }
     throw error;
+  }
+  // The budget can lose to a connect that closes before this line. Do not send
+  // the update on that session, and do not leave this handler queued behind it.
+  if (franken.isClosed) {
+    res.status(503).json({ error: 'Franken disconnected before the update was sent' });
+    return;
   }
   await updateDeviceStatus(body as DeepPartial<DeviceStatus>);
   res.status(204).end();

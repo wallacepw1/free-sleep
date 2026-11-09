@@ -1,5 +1,5 @@
 
-!function(){try{var e="undefined"!=typeof window?window:"undefined"!=typeof global?global:"undefined"!=typeof globalThis?globalThis:"undefined"!=typeof self?self:{},n=(new e.Error).stack;n&&(e._sentryDebugIds=e._sentryDebugIds||{},e._sentryDebugIds[n]="d371733f-5d43-5f50-826f-ed6944ba7e30")}catch(e){}}();
+!function(){try{var e="undefined"!=typeof window?window:"undefined"!=typeof global?global:"undefined"!=typeof globalThis?globalThis:"undefined"!=typeof self?self:{},n=(new e.Error).stack;n&&(e._sentryDebugIds=e._sentryDebugIds||{},e._sentryDebugIds[n]="4eb13fe8-d439-5c69-980e-83e4fab68588")}catch(e){}}();
 import { SequentialQueue } from './sequentialQueue.js';
 import { MessageReadTimeoutError, MessageStream } from './messageStream.js';
 import { frankenCommands } from './deviceApi.js';
@@ -259,8 +259,7 @@ class FrankenServer {
 /**
  * One listen socket and the currently accepted Franken client.
  * A slow or missing reply closes the client only. The listen socket stays in
- * place so frank can reconnect. It is rebound once, and only if no client has
- * ever connected, to recover a stale socket file at startup.
+ * place so frank can reconnect. A connection timeout does not unlink it.
  */
 export class FrankenConnection {
     socketPath;
@@ -283,16 +282,21 @@ export class FrankenConnection {
         if (budgetMs === undefined)
             return pending;
         return new Promise((resolve, reject) => {
+            let settled = false;
             const timer = setTimeout(() => {
+                if (settled)
+                    return;
+                settled = true;
                 reject(new FrankenRequestConnectBudgetError(budgetMs));
             }, budgetMs);
-            pending.then((franken) => {
+            const finish = (settle) => {
+                if (settled)
+                    return;
+                settled = true;
                 clearTimeout(timer);
-                resolve(franken);
-            }, (error) => {
-                clearTimeout(timer);
-                reject(error);
-            });
+                settle();
+            };
+            pending.then((franken) => finish(() => resolve(franken)), (error) => finish(() => reject(error)));
         });
     }
     beginConnect() {
@@ -454,4 +458,4 @@ export async function disconnectFranken() {
     await defaultConnection.disconnect();
 }
 //# sourceMappingURL=frankenServer.js.map
-//# debugId=d371733f-5d43-5f50-826f-ed6944ba7e30
+//# debugId=4eb13fe8-d439-5c69-980e-83e4fab68588

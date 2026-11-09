@@ -298,8 +298,7 @@ class FrankenServer {
 /**
  * One listen socket and the currently accepted Franken client.
  * A slow or missing reply closes the client only. The listen socket stays in
- * place so frank can reconnect. It is rebound once, and only if no client has
- * ever connected, to recover a stale socket file at startup.
+ * place so frank can reconnect. A connection timeout does not unlink it.
  */
 export class FrankenConnection {
   private server: FrankenServer | undefined;
@@ -323,18 +322,21 @@ export class FrankenConnection {
     const pending = this.beginConnect();
     if (budgetMs === undefined) return pending;
     return new Promise((resolve, reject) => {
+      let settled = false;
       const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
         reject(new FrankenRequestConnectBudgetError(budgetMs));
       }, budgetMs);
+      const finish = (settle: () => void) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        settle();
+      };
       pending.then(
-        (franken) => {
-          clearTimeout(timer);
-          resolve(franken);
-        },
-        (error: unknown) => {
-          clearTimeout(timer);
-          reject(error);
-        },
+        (franken) => finish(() => resolve(franken)),
+        (error: unknown) => finish(() => reject(error)),
       );
     });
   }

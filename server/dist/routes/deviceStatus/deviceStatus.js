@@ -1,5 +1,5 @@
 
-!function(){try{var e="undefined"!=typeof window?window:"undefined"!=typeof global?global:"undefined"!=typeof globalThis?globalThis:"undefined"!=typeof self?self:{},n=(new e.Error).stack;n&&(e._sentryDebugIds=e._sentryDebugIds||{},e._sentryDebugIds[n]="c0e9af19-e6e0-550f-bf34-42d762473531")}catch(e){}}();
+!function(){try{var e="undefined"!=typeof window?window:"undefined"!=typeof global?global:"undefined"!=typeof globalThis?globalThis:"undefined"!=typeof self?self:{},n=(new e.Error).stack;n&&(e._sentryDebugIds=e._sentryDebugIds||{},e._sentryDebugIds[n]="72e35219-3295-59fa-8afe-2a4a806c95ea")}catch(e){}}();
 import express from 'express';
 import { callFranken, connectFranken, FRANKEN_REQUEST_CONNECT_BUDGET_MS, FrankenRequestConnectBudgetError, } from '../../8sleep/frankenServer.js';
 import { DeviceStatusSchema } from './deviceStatusSchema.js';
@@ -30,8 +30,9 @@ router.post('/deviceStatus', async (req, res) => {
         });
         return;
     }
+    let franken;
     try {
-        await connectFranken({ connectBudgetMs: FRANKEN_REQUEST_CONNECT_BUDGET_MS });
+        franken = await connectFranken({ connectBudgetMs: FRANKEN_REQUEST_CONNECT_BUDGET_MS });
     }
     catch (error) {
         if (error instanceof FrankenRequestConnectBudgetError) {
@@ -40,9 +41,15 @@ router.post('/deviceStatus', async (req, res) => {
         }
         throw error;
     }
+    // The budget can lose to a connect that closes before this line. Do not send
+    // the update on that session, and do not leave this handler queued behind it.
+    if (franken.isClosed) {
+        res.status(503).json({ error: 'Franken disconnected before the update was sent' });
+        return;
+    }
     await updateDeviceStatus(body);
     res.status(204).end();
 });
 export default router;
 //# sourceMappingURL=deviceStatus.js.map
-//# debugId=c0e9af19-e6e0-550f-bf34-42d762473531
+//# debugId=72e35219-3295-59fa-8afe-2a4a806c95ea

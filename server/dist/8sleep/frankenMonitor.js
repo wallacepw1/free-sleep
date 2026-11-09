@@ -1,5 +1,5 @@
 
-!function(){try{var e="undefined"!=typeof window?window:"undefined"!=typeof global?global:"undefined"!=typeof globalThis?globalThis:"undefined"!=typeof self?self:{},n=(new e.Error).stack;n&&(e._sentryDebugIds=e._sentryDebugIds||{},e._sentryDebugIds[n]="dac88385-3857-582e-87dd-e62aaf8c68ab")}catch(e){}}();
+!function(){try{var e="undefined"!=typeof window?window:"undefined"!=typeof global?global:"undefined"!=typeof globalThis?globalThis:"undefined"!=typeof self?self:{},n=(new e.Error).stack;n&&(e._sentryDebugIds=e._sentryDebugIds||{},e._sentryDebugIds[n]="ab2728b7-0c1d-5dc5-b771-c53ce2957a19")}catch(e){}}();
 import moment from 'moment-timezone';
 import logger from '../logger.js';
 import settingsDB from '../db/settings.js';
@@ -83,6 +83,9 @@ export class FrankenMonitor {
             try {
                 if (!this.deviceStatus) {
                     const initialStatus = await callFranken((session) => session.getDeviceStatus(false));
+                    // Pod 3 is the identified cover without side taps, so it uses the slow poll.
+                    // Any other string, including "Version not found", keeps gesture reads.
+                    // This hub's beta cover has taps and must not be relabeled or slowed as Pod 3.
                     const gesturesSupported = initialStatus.coverVersion !== Version.Pod3;
                     waitTime = gesturesSupported ? 2_000 : 60_000;
                     if (gesturesSupported) {
@@ -124,4 +127,4 @@ export class FrankenMonitor {
     }
 }
 //# sourceMappingURL=frankenMonitor.js.map
-//# debugId=dac88385-3857-582e-87dd-e62aaf8c68ab
+//# debugId=ab2728b7-0c1d-5dc5-b771-c53ce2957a19

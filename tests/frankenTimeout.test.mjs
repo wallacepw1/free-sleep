@@ -463,6 +463,73 @@ test('a request budget fails without dropping the listen socket or the in-flight
   }
 });
 
+test('a 503 connect budget does not send a queued update after a later client', async () => {
+  const sockPath = join(dataFolder, 'post-budget.sock');
+  const connection = new FrankenConnection(sockPath, {
+    ...fastTiming,
+    connectionTimeoutMs: 400,
+    connectionMaxAttempts: 4,
+  });
+  const received = [];
+  let updateRan = 0;
+
+  // Same order as POST /api/deviceStatus: connect under the budget, and only
+  // then send. A budget failure must return before any command is written.
+  const postUpdate = async () => {
+    let franken;
+    try {
+      franken = await connection.connect(40);
+    } catch (error) {
+      if (error instanceof FrankenRequestConnectBudgetError) return '503';
+      throw error;
+    }
+    if (franken.isClosed) return '503';
+    updateRan += 1;
+    await franken.sendMessage('10\n43200');
+    return '204';
+  };
+
+  try {
+    const outcome = await postUpdate();
+    assert.equal(outcome, '503');
+    assert.equal(updateRan, 0);
+    const peerSocket = await connectPeer(sockPath);
+    const peer = new FramePeer(peerSocket, (request) => received.push(request));
+    await delay(80);
+    assert.equal(updateRan, 0);
+    assert.deepEqual(received, []);
+    assert.deepEqual(peer.requests, []);
+    peerSocket.destroy();
+  } finally {
+    await connection.disconnect();
+  }
+});
+
+test('disconnect before the update is sent does not write the command', async () => {
+  const sockPath = join(dataFolder, 'post-disconnect.sock');
+  const connection = new FrankenConnection(sockPath, fastTiming);
+  let peerSocket;
+  try {
+    const { pending } = await listen(connection);
+    peerSocket = await connectPeer(sockPath);
+    const received = [];
+    new FramePeer(peerSocket, (request) => received.push(request));
+    const franken = await pending;
+    franken.close();
+    let updateRan = 0;
+    if (!franken.isClosed) {
+      updateRan += 1;
+      await franken.sendMessage('10\n43200');
+    }
+    assert.equal(updateRan, 0);
+    await delay(20);
+    assert.deepEqual(received, []);
+  } finally {
+    await connection.disconnect();
+    peerSocket?.destroy();
+  }
+});
+
 test('disconnect cancels a wait without requiring every connection attempt', async () => {
   const sockPath = join(dataFolder, 'cancel.sock');
   const connection = new FrankenConnection(sockPath, {
