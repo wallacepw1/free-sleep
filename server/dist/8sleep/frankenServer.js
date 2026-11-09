@@ -1,7 +1,7 @@
 
-!function(){try{var e="undefined"!=typeof window?window:"undefined"!=typeof global?global:"undefined"!=typeof globalThis?globalThis:"undefined"!=typeof self?self:{},n=(new e.Error).stack;n&&(e._sentryDebugIds=e._sentryDebugIds||{},e._sentryDebugIds[n]="13f1defe-d61b-5369-a132-0c0cc2e7ea8e")}catch(e){}}();
+!function(){try{var e="undefined"!=typeof window?window:"undefined"!=typeof global?global:"undefined"!=typeof globalThis?globalThis:"undefined"!=typeof self?self:{},n=(new e.Error).stack;n&&(e._sentryDebugIds=e._sentryDebugIds||{},e._sentryDebugIds[n]="a5b2a9ae-6f9f-5fa6-9d94-58fdb6f47410")}catch(e){}}();
 import { SequentialQueue } from './sequentialQueue.js';
-import { MessageReadTimeoutError, MessageStream, } from './messageStream.js';
+import { MessageReadTimeoutError, MessageStream } from './messageStream.js';
 import { frankenCommands } from './deviceApi.js';
 import { UnixSocketServer } from './unixSocketServer.js';
 import logger from '../logger.js';
@@ -9,20 +9,17 @@ import { loadDeviceStatus } from './loadDeviceStatus.js';
 import config from '../config.js';
 import { toPromise, wait } from './promises.js';
 /**
- * Pod 3 normally answers DEVICE_STATUS in tens of milliseconds. Replies have
- * no correlation id, so only the outstanding write may consume the next frame.
- * Warn at 10s and keep reading that same write until 30s. A fresh-boot
- * RIGHT_TEMP_DURATION 43200 reply completed at 20475ms, so a 10s close cuts
- * off a reply that still belongs to that command. 30s still fails a missing
- * reply. Do not treat the extra wait as success.
+ * Pod 3 normally answers DEVICE_STATUS in tens of milliseconds. One slow
+ * DEVICE_STATUS still completed at 9386ms, inside the 10s bound. Replies past
+ * 10s are failures. Replies have no correlation id, so only the outstanding
+ * write may consume the next frame. At 10s, fail that command and drop the
+ * client socket. Do not keep waiting and do not treat the timeout as success.
  */
-export const FRANKEN_SLOW_REPLY_WARN_MS = 10_000;
-export const FRANKEN_RESPONSE_DEADLINE_MS = 30_000;
+export const FRANKEN_RESPONSE_DEADLINE_MS = 10_000;
 const FRANKEN_RESPONSE_DELAY_MS = 10;
 const FRANKEN_CONNECTION_TIMEOUT_MS = 25_000;
 const FRANKEN_CONNECTION_MAX_ATTEMPTS = 10;
 export const DEFAULT_FRANKEN_TIMING = {
-    slowReplyWarnMs: FRANKEN_SLOW_REPLY_WARN_MS,
     responseDeadlineMs: FRANKEN_RESPONSE_DEADLINE_MS,
     responseDelayMs: FRANKEN_RESPONSE_DELAY_MS,
     connectionTimeoutMs: FRANKEN_CONNECTION_TIMEOUT_MS,
@@ -120,18 +117,12 @@ export class Franken {
     }
     async readOutstandingReply(message) {
         const startedAt = Date.now();
-        const readOptions = {
-            deadlineMs: this.timing.responseDeadlineMs,
-            warnAfterMs: this.timing.slowReplyWarnMs,
-            onSlow: () => {
-                logger.warn(`Franken reply is later than ${this.timing.slowReplyWarnMs}ms. `
-                    + `Still waiting for this command only. message: ${message}`);
-            },
-        };
         try {
-            const response = await this.messageStream.readMessage(readOptions);
+            const response = await this.messageStream.readMessage({
+                deadlineMs: this.timing.responseDeadlineMs,
+            });
             const elapsedMs = Date.now() - startedAt;
-            if (elapsedMs >= this.timing.slowReplyWarnMs) {
+            if (elapsedMs >= 5_000) {
                 logger.warn(`Franken reply matched the outstanding command after ${elapsedMs}ms. message: ${message}`);
             }
             if (this.timing.responseDelayMs > 0) {
@@ -436,4 +427,4 @@ export async function disconnectFranken() {
     await defaultConnection.disconnect();
 }
 //# sourceMappingURL=frankenServer.js.map
-//# debugId=13f1defe-d61b-5369-a132-0c0cc2e7ea8e
+//# debugId=a5b2a9ae-6f9f-5fa6-9d94-58fdb6f47410

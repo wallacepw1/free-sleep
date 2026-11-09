@@ -18,8 +18,6 @@ export class MessageStreamInvalidatedError extends Error {
 
 export interface ReadMessageOptions {
   deadlineMs?: number;
-  warnAfterMs?: number;
-  onSlow?: () => void;
 }
 
 /**
@@ -96,15 +94,13 @@ export class MessageStream {
 
   /**
    * Read the next frame for the command that is already outstanding.
-   * A frame that arrives before the deadline belongs to that command even if
-   * it crosses the slow-reply warning. After the deadline the caller must
-   * invalidate this stream instead of issuing another read on it.
+   * A frame that is already complete when the deadline fires still belongs to
+   * that command. After the deadline the caller must invalidate this stream
+   * instead of issuing another read on it.
    */
   public async readMessage(options: ReadMessageOptions = {}): Promise<Buffer> {
     const startedAt = Date.now();
     const deadlineMs = options.deadlineMs;
-    const warnAfterMs = options.warnAfterMs;
-    let warned = false;
 
     while (true) {
       if (this.invalidated) throw new MessageStreamInvalidatedError();
@@ -127,44 +123,20 @@ export class MessageStream {
         throw new MessageReadTimeoutError(deadlineMs);
       }
 
-      const waitMs = this.nextWaitMs(elapsedMs, deadlineMs, warnAfterMs, warned);
+      const waitMs = deadlineMs === undefined
+        ? undefined
+        : Math.max(deadlineMs - elapsedMs, 0);
       try {
         await this.waitForData(waitMs);
       } catch (error) {
         if (this.invalidated) throw new MessageStreamInvalidatedError();
         const arrived = this.takeQueued();
         if (arrived) return arrived;
-
-        const elapsedAfterWait = Date.now() - startedAt;
-        if (deadlineMs !== undefined && elapsedAfterWait >= deadlineMs) {
+        if (deadlineMs !== undefined && Date.now() - startedAt >= deadlineMs) {
           throw new MessageReadTimeoutError(deadlineMs);
-        }
-        if (
-          error instanceof MessageReadTimeoutError
-          && deadlineMs !== undefined
-          && warnAfterMs !== undefined
-          && !warned
-        ) {
-          warned = true;
-          options.onSlow?.();
-          continue;
         }
         throw error;
       }
     }
-  }
-
-  private nextWaitMs(
-    elapsedMs: number,
-    deadlineMs: number | undefined,
-    warnAfterMs: number | undefined,
-    warned: boolean,
-  ): number | undefined {
-    if (deadlineMs === undefined) return undefined;
-    const untilDeadline = Math.max(deadlineMs - elapsedMs, 0);
-    if (!warned && warnAfterMs !== undefined && elapsedMs < warnAfterMs) {
-      return Math.min(untilDeadline, warnAfterMs - elapsedMs);
-    }
-    return untilDeadline;
   }
 }

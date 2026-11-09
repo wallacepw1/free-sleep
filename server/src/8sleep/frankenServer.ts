@@ -1,11 +1,7 @@
 import { Socket } from 'net';
 
 import { SequentialQueue } from './sequentialQueue.js';
-import {
-  MessageReadTimeoutError,
-  MessageStream,
-  ReadMessageOptions,
-} from './messageStream.js';
+import { MessageReadTimeoutError, MessageStream } from './messageStream.js';
 import { FrankenCommand, frankenCommands } from './deviceApi.js';
 
 import { UnixSocketServer } from './unixSocketServer.js';
@@ -16,21 +12,18 @@ import config from '../config.js';
 import { toPromise, wait } from './promises.js';
 
 /**
- * Pod 3 normally answers DEVICE_STATUS in tens of milliseconds. Replies have
- * no correlation id, so only the outstanding write may consume the next frame.
- * Warn at 10s and keep reading that same write until 30s. A fresh-boot
- * RIGHT_TEMP_DURATION 43200 reply completed at 20475ms, so a 10s close cuts
- * off a reply that still belongs to that command. 30s still fails a missing
- * reply. Do not treat the extra wait as success.
+ * Pod 3 normally answers DEVICE_STATUS in tens of milliseconds. One slow
+ * DEVICE_STATUS still completed at 9386ms, inside the 10s bound. Replies past
+ * 10s are failures. Replies have no correlation id, so only the outstanding
+ * write may consume the next frame. At 10s, fail that command and drop the
+ * client socket. Do not keep waiting and do not treat the timeout as success.
  */
-export const FRANKEN_SLOW_REPLY_WARN_MS = 10_000;
-export const FRANKEN_RESPONSE_DEADLINE_MS = 30_000;
+export const FRANKEN_RESPONSE_DEADLINE_MS = 10_000;
 const FRANKEN_RESPONSE_DELAY_MS = 10;
 const FRANKEN_CONNECTION_TIMEOUT_MS = 25_000;
 const FRANKEN_CONNECTION_MAX_ATTEMPTS = 10;
 
 export interface FrankenTiming {
-  slowReplyWarnMs: number;
   responseDeadlineMs: number;
   responseDelayMs: number;
   connectionTimeoutMs: number;
@@ -38,7 +31,6 @@ export interface FrankenTiming {
 }
 
 export const DEFAULT_FRANKEN_TIMING: FrankenTiming = {
-  slowReplyWarnMs: FRANKEN_SLOW_REPLY_WARN_MS,
   responseDeadlineMs: FRANKEN_RESPONSE_DEADLINE_MS,
   responseDelayMs: FRANKEN_RESPONSE_DELAY_MS,
   connectionTimeoutMs: FRANKEN_CONNECTION_TIMEOUT_MS,
@@ -147,21 +139,12 @@ export class Franken {
 
   private async readOutstandingReply(message: string): Promise<Buffer> {
     const startedAt = Date.now();
-    const readOptions: ReadMessageOptions = {
-      deadlineMs: this.timing.responseDeadlineMs,
-      warnAfterMs: this.timing.slowReplyWarnMs,
-      onSlow: () => {
-        logger.warn(
-          `Franken reply is later than ${this.timing.slowReplyWarnMs}ms. `
-          + `Still waiting for this command only. message: ${message}`,
-        );
-      },
-    };
-
     try {
-      const response = await this.messageStream.readMessage(readOptions);
+      const response = await this.messageStream.readMessage({
+        deadlineMs: this.timing.responseDeadlineMs,
+      });
       const elapsedMs = Date.now() - startedAt;
-      if (elapsedMs >= this.timing.slowReplyWarnMs) {
+      if (elapsedMs >= 5_000) {
         logger.warn(
           `Franken reply matched the outstanding command after ${elapsedMs}ms. message: ${message}`,
         );

@@ -24,8 +24,7 @@ const {
 } = await import('../server/src/8sleep/frankenServer.ts');
 
 const fastTiming = {
-  slowReplyWarnMs: 30,
-  responseDeadlineMs: 90,
+  responseDeadlineMs: 80,
   responseDelayMs: 0,
   connectionTimeoutMs: 400,
   connectionMaxAttempts: 4,
@@ -111,34 +110,26 @@ test('an already framed reply is returned to the outstanding read', async () => 
   readable.write('READY\n\n');
   await delay(10);
   const startedAt = Date.now();
-  const message = await stream.readMessage({ deadlineMs: 500, warnAfterMs: 100 });
+  const message = await stream.readMessage({ deadlineMs: 500 });
   assert.equal(message.toString(), 'READY');
   assert.ok(Date.now() - startedAt < 50);
   readable.destroy();
 });
 
-test('a reply that crosses the warning stays with the outstanding command', async () => {
+test('synthetic: a reply before the deadline stays with the outstanding read', async () => {
   const readable = new PassThrough();
   const stream = new MessageStream(readable);
-  let slowNotices = 0;
-  const pending = stream.readMessage({
-    deadlineMs: 200,
-    warnAfterMs: 30,
-    onSlow: () => {
-      slowNotices += 1;
-    },
-  });
+  const pending = stream.readMessage({ deadlineMs: 200 });
   await delay(45);
   readable.write('SLOW\n\n');
   assert.equal((await pending).toString(), 'SLOW');
-  assert.equal(slowNotices, 1);
   readable.destroy();
 });
 
 test('a frame completed before the deadline is not discarded as a timeout', async () => {
   const readable = new PassThrough();
   const stream = new MessageStream(readable);
-  const pending = stream.readMessage({ deadlineMs: 80, warnAfterMs: 20 });
+  const pending = stream.readMessage({ deadlineMs: 80 });
   await delay(15);
   readable.write(Buffer.from('PAR'));
   await delay(15);
@@ -211,13 +202,14 @@ test('slow replies stay ordered and a following command is not sent early', asyn
   }
 });
 
-test('a 20475ms RIGHT_TEMP_DURATION reply stays with that command', async () => {
-  // Production ratio: warn 10s, observed success 20475ms, deadline 30s.
+test('synthetic: a 9386/10000 reply stays with RIGHT_TEMP_DURATION', async () => {
+  // Observed slow success is 9386ms inside the 10000ms deadline. 94ms against
+  // a 200ms synthetic deadline keeps that ratio with room for timer jitter.
+  // 20475ms is not an observed reply. The verified line was HTTP 204 in 75ms.
   const sockPath = join(dataFolder, 'right-duration.sock');
   const connection = new FrankenConnection(sockPath, {
     ...fastTiming,
-    slowReplyWarnMs: 40,
-    responseDeadlineMs: 500,
+    responseDeadlineMs: 200,
   });
   let peerSocket;
   try {
@@ -227,7 +219,7 @@ test('a 20475ms RIGHT_TEMP_DURATION reply stays with that command', async () => 
     const franken = await pending;
     new FramePeer(peerSocket, (request, current) => {
       received.push({ request, at: Date.now() });
-      const waitMs = request.startsWith('10\n') ? 82 : 5;
+      const waitMs = request.startsWith('10\n') ? 94 : 5;
       setTimeout(() => current.reply(`R:${request}`), waitMs);
     });
     const startedAt = Date.now();
@@ -235,11 +227,42 @@ test('a 20475ms RIGHT_TEMP_DURATION reply stays with that command', async () => 
     const left = franken.sendMessage('9\n43200');
     assert.equal(await right, 'R:10\n43200');
     const rightElapsed = Date.now() - startedAt;
-    assert.ok(rightElapsed >= 82, `right elapsed ${rightElapsed}`);
+    assert.ok(rightElapsed >= 94 && rightElapsed < 200, `right elapsed ${rightElapsed}`);
     assert.equal(await left, 'R:9\n43200');
     assert.deepEqual(received.map((entry) => entry.request), ['10\n43200', '9\n43200']);
     assert.ok(received[1].at >= received[0].at + 70);
     assert.equal(franken.isClosed, false);
+  } finally {
+    await connection.disconnect();
+    peerSocket?.destroy();
+  }
+});
+
+test('simulated only: 20475ms is past the 10s deadline and is not delivered', async () => {
+  // Simulated only. 20475ms was not a Franken reply. The verified line was
+  // `POST /api/deviceStatus - 204 - 75ms` (HTTP 204 in 75ms). Scale: 50ms
+  // stands in for the 10000ms deadline, so 103ms stands in for 20475ms.
+  const sockPath = join(dataFolder, 'simulated-20475.sock');
+  const connection = new FrankenConnection(sockPath, {
+    ...fastTiming,
+    responseDeadlineMs: 50,
+  });
+  let peerSocket;
+  try {
+    const { pending } = await listen(connection);
+    peerSocket = await connectPeer(sockPath);
+    const peer = new FramePeer(peerSocket, (request, current) => {
+      if (request.startsWith('10\n')) {
+        setTimeout(() => current.reply('SIMULATED-20475'), 103);
+      }
+    });
+    const franken = await pending;
+    const right = franken.sendMessage('10\n43200');
+    const left = franken.sendMessage('9\n43200');
+    await assert.rejects(right, (error) => error instanceof MessageReadTimeoutError);
+    await assert.rejects(left, assertUnsent);
+    assert.deepEqual(peer.requests, ['10\n43200']);
+    assert.equal(franken.isClosed, true);
   } finally {
     await connection.disconnect();
     peerSocket?.destroy();

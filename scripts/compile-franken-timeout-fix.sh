@@ -11,8 +11,8 @@ if [ ! -f "$src" ]; then
   echo "Missing $src"
   exit 1
 fi
-if ! grep -q 'Still waiting for this command only' "$src"; then
-  echo "Refusing to compile: the slow-reply patch is not present in $src"
+if ! grep -q 'The command was not sent' "$src"; then
+  echo "Refusing to compile: the unsent-command patch is not present in $src"
   exit 1
 fi
 if ! grep -q '"version": "3.0.3"' "$server/src/serverInfo.json"; then

@@ -48,8 +48,8 @@ if ! grep -q '"version": "3.0.3"' "$info" || ! grep -q '"branch": "main"' "$info
 fi
 echo "OK $info version 3.0.3 main"
 
-if grep -q 'Still waiting for this command only' server/src/8sleep/frankenServer.ts 2>/dev/null; then
-  echo "REFUSING: frankenServer.ts already contains the patched slow-reply marker"
+if grep -q 'The command was not sent' server/src/8sleep/frankenServer.ts 2>/dev/null; then
+  echo "REFUSING: frankenServer.ts already contains the patched unsent-command marker"
   exit 1
 fi
 if ! grep -q 'Closing stale socket' server/src/8sleep/frankenServer.ts 2>/dev/null; then
