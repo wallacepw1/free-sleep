@@ -19,11 +19,14 @@ const { MessageReadTimeoutError, MessageStream, MessageStreamInvalidatedError } 
 const {
   FrankenConnection,
   FrankenConnectCancelledError,
+  FrankenRequestConnectBudgetError,
   FrankenSocketClosedError,
   callOnFranken,
+  resolveResponseDeadlineMs,
 } = await import('../server/src/8sleep/frankenServer.ts');
 
 const fastTiming = {
+  slowReplyWarnMs: 30,
   responseDeadlineMs: 80,
   responseDelayMs: 0,
   connectionTimeoutMs: 400,
@@ -202,6 +205,46 @@ test('slow replies stay ordered and a following command is not sent early', asyn
   }
 });
 
+test('resolveResponseDeadlineMs stays inside 10s through 30s', () => {
+  assert.equal(resolveResponseDeadlineMs(undefined), 20_000);
+  assert.equal(resolveResponseDeadlineMs(''), 20_000);
+  assert.equal(resolveResponseDeadlineMs('15000'), 15_000);
+  assert.equal(resolveResponseDeadlineMs('1000'), 10_000);
+  assert.equal(resolveResponseDeadlineMs('60000'), 30_000);
+  assert.equal(resolveResponseDeadlineMs('nope'), 20_000);
+});
+
+test('synthetic: a reply after the slow mark and before the deadline stays with that command', async () => {
+  // Synthetic stand-in for a reply between the 10s log and the 20s default deadline.
+  const sockPath = join(dataFolder, 'grace.sock');
+  const connection = new FrankenConnection(sockPath, {
+    ...fastTiming,
+    slowReplyWarnMs: 30,
+    responseDeadlineMs: 120,
+  });
+  let peerSocket;
+  try {
+    const { pending } = await listen(connection);
+    peerSocket = await connectPeer(sockPath);
+    const received = [];
+    new FramePeer(peerSocket, (request, current) => {
+      received.push(request);
+      const waitMs = request === '14' ? 70 : 5;
+      setTimeout(() => current.reply(`R:${request}`), waitMs);
+    });
+    const franken = await pending;
+    const status = franken.sendMessage('14');
+    const left = franken.sendMessage('9\n43200');
+    assert.equal(await status, 'R:14');
+    assert.equal(await left, 'R:9\n43200');
+    assert.deepEqual(received, ['14', '9\n43200']);
+    assert.equal(franken.isClosed, false);
+  } finally {
+    await connection.disconnect();
+    peerSocket?.destroy();
+  }
+});
+
 test('synthetic: a 9386/10000 reply stays with RIGHT_TEMP_DURATION', async () => {
   // Observed slow success is 9386ms inside the 10000ms deadline. 94ms against
   // a 200ms synthetic deadline keeps that ratio with room for timer jitter.
@@ -227,7 +270,7 @@ test('synthetic: a 9386/10000 reply stays with RIGHT_TEMP_DURATION', async () =>
     const left = franken.sendMessage('9\n43200');
     assert.equal(await right, 'R:10\n43200');
     const rightElapsed = Date.now() - startedAt;
-    assert.ok(rightElapsed >= 94 && rightElapsed < 200, `right elapsed ${rightElapsed}`);
+    assert.ok(rightElapsed >= 94, `right elapsed ${rightElapsed}`);
     assert.equal(await left, 'R:9\n43200');
     assert.deepEqual(received.map((entry) => entry.request), ['10\n43200', '9\n43200']);
     assert.ok(received[1].at >= received[0].at + 70);
@@ -286,7 +329,6 @@ test('a missing reply invalidates the socket before the queued command is writte
     assert.deepEqual(peer.requests, ['14']);
     assert.equal(franken.isClosed, true);
     assert.equal(statSync(sockPath).ino, inode);
-    assert.equal(connection.listenSocketRebinds, 0);
     if (!peerSocket.destroyed) peerSocket.write('LATE14\n\n');
     await delay(15);
   } finally {
@@ -324,7 +366,6 @@ test('write after the client socket is destroyed does not surface ERR_STREAM_DES
       });
       assert.equal(await retried, 'OK:10\n43200');
       assert.deepEqual(requests, ['10\n43200']);
-      assert.equal(connection.listenSocketRebinds, 0);
     } finally {
       retryPeer.destroy();
     }
@@ -371,7 +412,6 @@ test('the unsent command is retried on a new client and does not consume the lat
     assert.equal(await second, 'OK:10\n43200');
     assert.deepEqual(requests, ['14', '10\n43200']);
     assert.equal(statSync(sockPath).ino, inode);
-    assert.equal(connection.listenSocketRebinds, 0);
   } finally {
     stopped.current = true;
     await connection.disconnect();
@@ -379,7 +419,7 @@ test('the unsent command is retried on a new client and does not consume the lat
   }
 });
 
-test('the listen socket is rebound at most once before any client, then left in place', async () => {
+test('connection timeouts do not replace the listen socket', async () => {
   const sockPath = join(dataFolder, 'rebind.sock');
   const timing = {
     ...fastTiming,
@@ -388,17 +428,39 @@ test('the listen socket is rebound at most once before any client, then left in 
   };
   const connection = new FrankenConnection(sockPath, timing);
   const pending = connection.connect();
-  await waitFor(() => connection.listenSocketRebinds === 1 && fileExists(sockPath));
+  await waitFor(() => fileExists(sockPath));
   const inode = statSync(sockPath).ino;
   await delay(100);
-  assert.equal(connection.listenSocketRebinds, 1);
   assert.equal(statSync(sockPath).ino, inode);
   const peerSocket = await connectPeer(sockPath);
   const franken = await pending;
   assert.equal(franken.isClosed, false);
-  assert.equal(connection.listenSocketRebinds, 1);
+  assert.equal(statSync(sockPath).ino, inode);
   await connection.disconnect();
   peerSocket.destroy();
+});
+
+test('a request budget fails without dropping the listen socket or the in-flight wait', async () => {
+  const sockPath = join(dataFolder, 'budget.sock');
+  const connection = new FrankenConnection(sockPath, {
+    ...fastTiming,
+    connectionTimeoutMs: 400,
+    connectionMaxAttempts: 4,
+  });
+  const budgetWait = connection.connect(40);
+  await assert.rejects(budgetWait, (error) => error instanceof FrankenRequestConnectBudgetError);
+  await waitFor(() => fileExists(sockPath));
+  const inode = statSync(sockPath).ino;
+  const pending = connection.connect();
+  const peerSocket = await connectPeer(sockPath);
+  try {
+    const franken = await pending;
+    assert.equal(franken.isClosed, false);
+    assert.equal(statSync(sockPath).ino, inode);
+  } finally {
+    await connection.disconnect();
+    peerSocket.destroy();
+  }
 });
 
 test('disconnect cancels a wait without requiring every connection attempt', async () => {

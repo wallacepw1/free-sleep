@@ -1,5 +1,5 @@
 
-!function(){try{var e="undefined"!=typeof window?window:"undefined"!=typeof global?global:"undefined"!=typeof globalThis?globalThis:"undefined"!=typeof self?self:{},n=(new e.Error).stack;n&&(e._sentryDebugIds=e._sentryDebugIds||{},e._sentryDebugIds[n]="a5b2a9ae-6f9f-5fa6-9d94-58fdb6f47410")}catch(e){}}();
+!function(){try{var e="undefined"!=typeof window?window:"undefined"!=typeof global?global:"undefined"!=typeof globalThis?globalThis:"undefined"!=typeof self?self:{},n=(new e.Error).stack;n&&(e._sentryDebugIds=e._sentryDebugIds||{},e._sentryDebugIds[n]="d371733f-5d43-5f50-826f-ed6944ba7e30")}catch(e){}}();
 import { SequentialQueue } from './sequentialQueue.js';
 import { MessageReadTimeoutError, MessageStream } from './messageStream.js';
 import { frankenCommands } from './deviceApi.js';
@@ -9,18 +9,34 @@ import { loadDeviceStatus } from './loadDeviceStatus.js';
 import config from '../config.js';
 import { toPromise, wait } from './promises.js';
 /**
- * Pod 3 normally answers DEVICE_STATUS in tens of milliseconds. One slow
- * DEVICE_STATUS still completed at 9386ms, inside the 10s bound. Replies past
- * 10s are failures. Replies have no correlation id, so only the outstanding
- * write may consume the next frame. At 10s, fail that command and drop the
- * client socket. Do not keep waiting and do not treat the timeout as success.
+ * Pod 3 DEVICE_STATUS is usually tens of milliseconds. One completed at 9386ms.
+ * A 10s close is not proof the reply will never arrive: on the 8:25 PM CST
+ * deploy, that close was followed by minutes with no client. Log at 10s and
+ * keep reading the same outstanding command until the deadline. The default
+ * deadline is 20s. Set FRANKEN_RESPONSE_DEADLINE_MS from 10s through 30s.
+ * The verified POST /api/deviceStatus - 204 - 75ms line is an HTTP 204 in 75ms.
+ * A longer deadline is a measurement window, not an observed 20s success.
  */
-export const FRANKEN_RESPONSE_DEADLINE_MS = 10_000;
+export const FRANKEN_SLOW_REPLY_WARN_MS = 10_000;
+export const FRANKEN_RESPONSE_DEADLINE_DEFAULT_MS = 20_000;
+export const FRANKEN_RESPONSE_DEADLINE_MAX_MS = 30_000;
+/** API calls fail here if no client is connected, instead of holding the HTTP response open. */
+export const FRANKEN_REQUEST_CONNECT_BUDGET_MS = 15_000;
 const FRANKEN_RESPONSE_DELAY_MS = 10;
 const FRANKEN_CONNECTION_TIMEOUT_MS = 25_000;
 const FRANKEN_CONNECTION_MAX_ATTEMPTS = 10;
+export function resolveResponseDeadlineMs(raw = process.env.FRANKEN_RESPONSE_DEADLINE_MS) {
+    if (raw === undefined || raw.trim() === '')
+        return FRANKEN_RESPONSE_DEADLINE_DEFAULT_MS;
+    const parsed = Number(raw);
+    if (!Number.isFinite(parsed))
+        return FRANKEN_RESPONSE_DEADLINE_DEFAULT_MS;
+    const bounded = Math.min(FRANKEN_RESPONSE_DEADLINE_MAX_MS, Math.max(FRANKEN_SLOW_REPLY_WARN_MS, parsed));
+    return Math.floor(bounded);
+}
 export const DEFAULT_FRANKEN_TIMING = {
-    responseDeadlineMs: FRANKEN_RESPONSE_DEADLINE_MS,
+    slowReplyWarnMs: FRANKEN_SLOW_REPLY_WARN_MS,
+    responseDeadlineMs: resolveResponseDeadlineMs(),
     responseDelayMs: FRANKEN_RESPONSE_DELAY_MS,
     connectionTimeoutMs: FRANKEN_CONNECTION_TIMEOUT_MS,
     connectionMaxAttempts: FRANKEN_CONNECTION_MAX_ATTEMPTS,
@@ -45,6 +61,12 @@ class FrankenConnectionTimeoutError extends Error {
     constructor() {
         super('Timed out waiting for Franken hardware connection');
         this.name = 'FrankenConnectionTimeoutError';
+    }
+}
+export class FrankenRequestConnectBudgetError extends Error {
+    constructor(budgetMs) {
+        super(`No Franken client for this request after ${budgetMs}ms. The listen socket is still waiting.`);
+        this.name = 'FrankenRequestConnectBudgetError';
     }
 }
 class FrankenConnectionFailedError extends Error {
@@ -120,9 +142,15 @@ export class Franken {
         try {
             const response = await this.messageStream.readMessage({
                 deadlineMs: this.timing.responseDeadlineMs,
+                warnAfterMs: this.timing.slowReplyWarnMs,
+                onSlow: () => {
+                    logger.warn(`Franken reply is later than ${this.timing.slowReplyWarnMs}ms. `
+                        + `Still waiting for this command only. message: ${message}. `
+                        + `deadlineMs: ${this.timing.responseDeadlineMs}`);
+                },
             });
             const elapsedMs = Date.now() - startedAt;
-            if (elapsedMs >= 5_000) {
+            if (elapsedMs >= this.timing.slowReplyWarnMs) {
                 logger.warn(`Franken reply matched the outstanding command after ${elapsedMs}ms. message: ${message}`);
             }
             if (this.timing.responseDelayMs > 0) {
@@ -242,19 +270,32 @@ export class FrankenConnection {
     connectPromise;
     generation = 0;
     hadClient = false;
-    rebindCount = 0;
     linkListener;
     constructor(socketPath, timing = DEFAULT_FRANKEN_TIMING) {
         this.socketPath = socketPath;
         this.timing = timing;
     }
-    get listenSocketRebinds() {
-        return this.rebindCount;
-    }
     setLinkListener(listener) {
         this.linkListener = listener;
     }
-    connect() {
+    connect(budgetMs) {
+        const pending = this.beginConnect();
+        if (budgetMs === undefined)
+            return pending;
+        return new Promise((resolve, reject) => {
+            const timer = setTimeout(() => {
+                reject(new FrankenRequestConnectBudgetError(budgetMs));
+            }, budgetMs);
+            pending.then((franken) => {
+                clearTimeout(timer);
+                resolve(franken);
+            }, (error) => {
+                clearTimeout(timer);
+                reject(error);
+            });
+        });
+    }
+    beginConnect() {
         if (this.franken && !this.franken.isClosed)
             return Promise.resolve(this.franken);
         this.franken = undefined;
@@ -361,21 +402,13 @@ export class FrankenConnection {
         return franken;
     }
     /**
-     * A missing client used to close and unlink dac.sock on every 25s attempt.
-     * That restart is what makes frank reinitialize for minutes. Rebind once
-     * only when startup has never accepted a client.
+     * UnixSocketServer.start already replaces a stale socket file once. Unlinking
+     * it again after 25s is what delayed the first client on the 8:25 PM deploy.
+     * Later attempts keep the same listen socket.
      */
     async handleConnectionTimeout(attempt, maxAttempts, error) {
-        const rebindStaleStartupSocket = !this.hadClient && this.rebindCount < 1;
-        if (rebindStaleStartupSocket) {
-            this.rebindCount += 1;
-            logger.warn('No Franken client yet. Rebinding the listen socket once in case the socket file is stale.');
-            await this.shutdown();
-        }
-        else {
-            logger.warn('Franken client not connected. Keeping the listen socket so the device can reconnect '
-                + 'without a subsystem restart.');
-        }
+        logger.warn('Franken client not connected. Keeping the listen socket so the device can reconnect '
+            + 'without a subsystem restart.');
         if (attempt < maxAttempts)
             return;
         const failed = new FrankenConnectionFailedError(maxAttempts, error);
@@ -396,12 +429,6 @@ const defaultConnection = new FrankenConnection(config.dacSockPath);
 export function setFrankenLinkListener(listener) {
     defaultConnection.setLinkListener(listener);
 }
-/**
- * Run one socket operation. If the socket was invalidated before the command
- * was written, reconnect once and run it on the new client. A timeout is not
- * retried: the write may already have been applied, and a resend would be a
- * second command with nothing to tell the two replies apart.
- */
 export async function callOnFranken(connect, operation) {
     const first = await connect();
     try {
@@ -417,14 +444,14 @@ export async function callOnFranken(connect, operation) {
         return await operation(second);
     }
 }
-export function callFranken(operation) {
-    return callOnFranken(() => defaultConnection.connect(), operation);
+export function callFranken(operation, options) {
+    return callOnFranken(() => defaultConnection.connect(options?.connectBudgetMs), operation);
 }
-export function connectFranken() {
-    return defaultConnection.connect();
+export function connectFranken(options) {
+    return defaultConnection.connect(options?.connectBudgetMs);
 }
 export async function disconnectFranken() {
     await defaultConnection.disconnect();
 }
 //# sourceMappingURL=frankenServer.js.map
-//# debugId=a5b2a9ae-6f9f-5fa6-9d94-58fdb6f47410
+//# debugId=d371733f-5d43-5f50-826f-ed6944ba7e30

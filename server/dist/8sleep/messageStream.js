@@ -1,5 +1,5 @@
 
-!function(){try{var e="undefined"!=typeof window?window:"undefined"!=typeof global?global:"undefined"!=typeof globalThis?globalThis:"undefined"!=typeof self?self:{},n=(new e.Error).stack;n&&(e._sentryDebugIds=e._sentryDebugIds||{},e._sentryDebugIds[n]="04969e4a-68c4-5377-a17f-a9b266070700")}catch(e){}}();
+!function(){try{var e="undefined"!=typeof window?window:"undefined"!=typeof global?global:"undefined"!=typeof globalThis?globalThis:"undefined"!=typeof self?self:{},n=(new e.Error).stack;n&&(e._sentryDebugIds=e._sentryDebugIds||{},e._sentryDebugIds[n]="4122a957-0f2f-50c5-8d85-360f84e603dd")}catch(e){}}();
 import { once } from 'events';
 import binarySplit from 'binary-split';
 export class MessageReadTimeoutError extends Error {
@@ -90,6 +90,7 @@ export class MessageStream {
     async readMessage(options = {}) {
         const startedAt = Date.now();
         const deadlineMs = options.deadlineMs;
+        let warned = false;
         while (true) {
             if (this.invalidated)
                 throw new MessageStreamInvalidatedError();
@@ -110,9 +111,7 @@ export class MessageStream {
                     return lateQueued;
                 throw new MessageReadTimeoutError(deadlineMs);
             }
-            const waitMs = deadlineMs === undefined
-                ? undefined
-                : Math.max(deadlineMs - elapsedMs, 0);
+            const waitMs = this.nextWaitMs(elapsedMs, deadlineMs, options.warnAfterMs, warned);
             try {
                 await this.waitForData(waitMs);
             }
@@ -122,13 +121,35 @@ export class MessageStream {
                 const arrived = this.takeQueued();
                 if (arrived)
                     return arrived;
-                if (deadlineMs !== undefined && Date.now() - startedAt >= deadlineMs) {
+                const elapsedAfterWait = Date.now() - startedAt;
+                if (deadlineMs !== undefined && elapsedAfterWait >= deadlineMs) {
                     throw new MessageReadTimeoutError(deadlineMs);
+                }
+                // The warn timer can fire before Date.now() reaches the mark. Any
+                // timeout before the deadline is only the slow-reply log.
+                if (error instanceof MessageReadTimeoutError
+                    && deadlineMs !== undefined
+                    && elapsedAfterWait < deadlineMs
+                    && options.warnAfterMs !== undefined
+                    && !warned) {
+                    warned = true;
+                    options.onSlow?.();
+                    continue;
                 }
                 throw error;
             }
         }
     }
+    /** Wait until the slow-reply mark first, then until the deadline. The mark does not close the socket. */
+    nextWaitMs(elapsedMs, deadlineMs, warnAfterMs, warned) {
+        if (deadlineMs === undefined)
+            return undefined;
+        const untilDeadline = Math.max(deadlineMs - elapsedMs, 0);
+        if (!warned && warnAfterMs !== undefined && elapsedMs < warnAfterMs) {
+            return Math.min(untilDeadline, Math.max(warnAfterMs - elapsedMs, 0));
+        }
+        return untilDeadline;
+    }
 }
 //# sourceMappingURL=messageStream.js.map
-//# debugId=04969e4a-68c4-5377-a17f-a9b266070700
+//# debugId=4122a957-0f2f-50c5-8d85-360f84e603dd

@@ -1,5 +1,10 @@
 import express, { Request, Response } from 'express';
-import { callFranken } from '../../8sleep/frankenServer.js';
+import {
+  callFranken,
+  connectFranken,
+  FRANKEN_REQUEST_CONNECT_BUDGET_MS,
+  FrankenRequestConnectBudgetError,
+} from '../../8sleep/frankenServer.js';
 import { DeviceStatus, DeviceStatusSchema } from './deviceStatusSchema.js';
 import logger from '../../logger.js';
 import { updateDeviceStatus } from './updateDeviceStatus.js';
@@ -8,8 +13,19 @@ import { DeepPartial } from 'ts-essentials';
 const router = express.Router();
 
 router.get('/deviceStatus', async (req: Request, res: Response) => {
-  const resp = await callFranken((franken) => franken.getDeviceStatus());
-  res.json(resp);
+  try {
+    const resp = await callFranken(
+      (franken) => franken.getDeviceStatus(),
+      { connectBudgetMs: FRANKEN_REQUEST_CONNECT_BUDGET_MS },
+    );
+    res.json(resp);
+  } catch (error) {
+    if (error instanceof FrankenRequestConnectBudgetError) {
+      res.status(503).json({ error: error.message });
+      return;
+    }
+    throw error;
+  }
 });
 
 
@@ -25,6 +41,15 @@ router.post('/deviceStatus', async (req: Request, res: Response) => {
     return;
   }
 
+  try {
+    await connectFranken({ connectBudgetMs: FRANKEN_REQUEST_CONNECT_BUDGET_MS });
+  } catch (error) {
+    if (error instanceof FrankenRequestConnectBudgetError) {
+      res.status(503).json({ error: error.message });
+      return;
+    }
+    throw error;
+  }
   await updateDeviceStatus(body as DeepPartial<DeviceStatus>);
   res.status(204).end();
 });

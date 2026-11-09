@@ -18,6 +18,8 @@ export class MessageStreamInvalidatedError extends Error {
 
 export interface ReadMessageOptions {
   deadlineMs?: number;
+  warnAfterMs?: number;
+  onSlow?: () => void;
 }
 
 /**
@@ -101,6 +103,7 @@ export class MessageStream {
   public async readMessage(options: ReadMessageOptions = {}): Promise<Buffer> {
     const startedAt = Date.now();
     const deadlineMs = options.deadlineMs;
+    let warned = false;
 
     while (true) {
       if (this.invalidated) throw new MessageStreamInvalidatedError();
@@ -123,20 +126,47 @@ export class MessageStream {
         throw new MessageReadTimeoutError(deadlineMs);
       }
 
-      const waitMs = deadlineMs === undefined
-        ? undefined
-        : Math.max(deadlineMs - elapsedMs, 0);
+      const waitMs = this.nextWaitMs(elapsedMs, deadlineMs, options.warnAfterMs, warned);
       try {
         await this.waitForData(waitMs);
       } catch (error) {
         if (this.invalidated) throw new MessageStreamInvalidatedError();
         const arrived = this.takeQueued();
         if (arrived) return arrived;
-        if (deadlineMs !== undefined && Date.now() - startedAt >= deadlineMs) {
+        const elapsedAfterWait = Date.now() - startedAt;
+        if (deadlineMs !== undefined && elapsedAfterWait >= deadlineMs) {
           throw new MessageReadTimeoutError(deadlineMs);
+        }
+        // The warn timer can fire before Date.now() reaches the mark. Any
+        // timeout before the deadline is only the slow-reply log.
+        if (
+          error instanceof MessageReadTimeoutError
+          && deadlineMs !== undefined
+          && elapsedAfterWait < deadlineMs
+          && options.warnAfterMs !== undefined
+          && !warned
+        ) {
+          warned = true;
+          options.onSlow?.();
+          continue;
         }
         throw error;
       }
     }
+  }
+
+  /** Wait until the slow-reply mark first, then until the deadline. The mark does not close the socket. */
+  private nextWaitMs(
+    elapsedMs: number,
+    deadlineMs: number | undefined,
+    warnAfterMs: number | undefined,
+    warned: boolean,
+  ): number | undefined {
+    if (deadlineMs === undefined) return undefined;
+    const untilDeadline = Math.max(deadlineMs - elapsedMs, 0);
+    if (!warned && warnAfterMs !== undefined && elapsedMs < warnAfterMs) {
+      return Math.min(untilDeadline, Math.max(warnAfterMs - elapsedMs, 0));
+    }
+    return untilDeadline;
   }
 }
