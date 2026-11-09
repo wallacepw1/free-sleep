@@ -1,5 +1,5 @@
 
-!function(){try{var e="undefined"!=typeof window?window:"undefined"!=typeof global?global:"undefined"!=typeof globalThis?globalThis:"undefined"!=typeof self?self:{},n=(new e.Error).stack;n&&(e._sentryDebugIds=e._sentryDebugIds||{},e._sentryDebugIds[n]="9255f6d2-cabe-5a5f-9838-091702577fb5")}catch(e){}}();
+!function(){try{var e="undefined"!=typeof window?window:"undefined"!=typeof global?global:"undefined"!=typeof globalThis?globalThis:"undefined"!=typeof self?self:{},n=(new e.Error).stack;n&&(e._sentryDebugIds=e._sentryDebugIds||{},e._sentryDebugIds[n]="782d9f6e-1875-5522-afca-e536f7c34ea7")}catch(e){}}();
 import schedule from 'node-schedule';
 import cbor from 'cbor';
 import moment from 'moment-timezone';
@@ -10,7 +10,7 @@ import schedulesDB from '../db/schedules.js';
 import settingsDB from '../db/settings.js';
 import { executeFunction } from '../8sleep/deviceApi.js';
 import { getDayIndexForSchedule, logJob } from './utils.js';
-import { connectFranken } from '../8sleep/frankenServer.js';
+import { callFranken } from '../8sleep/frankenServer.js';
 export const executeAlarm = async ({ vibrationIntensity, duration, vibrationPattern, side, force = false }) => {
     try {
         const min10Duration = Math.max(10, duration);
@@ -23,8 +23,7 @@ export const executeAlarm = async ({ vibrationIntensity, duration, vibrationPatt
             }
         }
         // Exit if side is off
-        const franken = await connectFranken();
-        const resp = await franken.getDeviceStatus();
+        const resp = await callFranken((franken) => franken.getDeviceStatus());
         if (!resp[side].isOn && !force) {
             logger.debug('Not executing alarm, side is off!');
             return;
@@ -148,4 +147,4 @@ export const scheduleAlarm = (settingsData, side, day, dailySchedule) => {
     });
 };
 //# sourceMappingURL=alarmScheduler.js.map
-//# debugId=9255f6d2-cabe-5a5f-9838-091702577fb5
+//# debugId=782d9f6e-1875-5522-afca-e536f7c34ea7

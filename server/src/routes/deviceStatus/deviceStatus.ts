@@ -1,5 +1,5 @@
 import express, { Request, Response } from 'express';
-import { connectFranken } from '../../8sleep/frankenServer.js';
+import { callFranken } from '../../8sleep/frankenServer.js';
 import { DeviceStatus, DeviceStatusSchema } from './deviceStatusSchema.js';
 import logger from '../../logger.js';
 import { updateDeviceStatus } from './updateDeviceStatus.js';
@@ -8,8 +8,7 @@ import { DeepPartial } from 'ts-essentials';
 const router = express.Router();
 
 router.get('/deviceStatus', async (req: Request, res: Response) => {
-  const franken = await connectFranken();
-  const resp = await franken.getDeviceStatus();
+  const resp = await callFranken((franken) => franken.getDeviceStatus());
   res.json(resp);
 });
 

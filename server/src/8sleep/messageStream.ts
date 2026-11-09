@@ -9,68 +9,162 @@ export class MessageReadTimeoutError extends Error {
   }
 }
 
+export class MessageStreamInvalidatedError extends Error {
+  public constructor() {
+    super('Franken response stream was invalidated');
+    this.name = 'MessageStreamInvalidatedError';
+  }
+}
+
+export interface ReadMessageOptions {
+  deadlineMs?: number;
+  warnAfterMs?: number;
+  onSlow?: () => void;
+}
+
+/**
+ * Frames one outstanding `\n\n`-delimited reply. A late frame stays in this
+ * stream until it is read or the stream is invalidated; it is never silently
+ * handed to a later read after invalidation.
+ */
 export class MessageStream {
   private readonly splitter: Transform;
   private readonly queue: Buffer[] = [];
   private ended = false;
-  private error: unknown;
+  private invalidated = false;
+  private streamError: unknown;
 
   public constructor(
     readable: NodeJS.ReadableStream,
-    separator = Buffer.from('\n\n')
+    separator = Buffer.from('\n\n'),
   ) {
     this.splitter = binarySplit(separator);
     this.splitter.on('data', (chunk: Buffer) => {
+      if (this.invalidated) return;
       this.queue.push(chunk);
     });
     this.splitter.on('end', () => {
       this.ended = true;
     });
-    this.splitter.on('error', (err: unknown) => {
-      this.error = err;
+    this.splitter.on('error', (error: unknown) => {
+      this.streamError = error;
     });
 
     readable.pipe(this.splitter);
-    readable.on('error', (error) => this.splitter.destroy(error));
+    readable.on('error', (error: Error) => {
+      this.splitter.destroy(error);
+    });
   }
 
-  private async waitForData(timeoutMs?: number) {
-    if (!timeoutMs) {
+  /** Drop buffered frames so they cannot be paired with a later command. */
+  public invalidate(): void {
+    this.invalidated = true;
+    this.queue.length = 0;
+  }
+
+  private takeQueued(): Buffer | undefined {
+    if (this.invalidated) return undefined;
+    return this.queue.shift();
+  }
+
+  /**
+   * Wait until the splitter emits a frame. A timeout aborts the event listener
+   * so a later stream error cannot reject an abandoned promise.
+   */
+  private async waitForData(timeoutMs?: number): Promise<void> {
+    if (this.invalidated || this.queue.length > 0) return;
+
+    if (timeoutMs === undefined) {
       await once(this.splitter, 'data');
       return;
     }
 
-    let timeout: NodeJS.Timeout | undefined;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      await Promise.race([
-        once(this.splitter, 'data'),
-        new Promise<never>((_resolve, reject) => {
-          timeout = setTimeout(() => reject(new MessageReadTimeoutError(timeoutMs)), timeoutMs);
-        }),
-      ]);
+      await once(this.splitter, 'data', { signal: controller.signal });
+    } catch (error) {
+      if (this.queue.length > 0) return;
+      if (controller.signal.aborted) {
+        throw new MessageReadTimeoutError(timeoutMs);
+      }
+      throw error;
     } finally {
-      if (timeout) clearTimeout(timeout);
+      clearTimeout(timer);
     }
   }
 
-  public async readMessage(timeoutMs?: number): Promise<Buffer> {
-    // eslint-disable-next-line no-constant-condition
+  /**
+   * Read the next frame for the command that is already outstanding.
+   * A frame that arrives before the deadline belongs to that command even if
+   * it crosses the slow-reply warning. After the deadline the caller must
+   * invalidate this stream instead of issuing another read on it.
+   */
+  public async readMessage(options: ReadMessageOptions = {}): Promise<Buffer> {
+    const startedAt = Date.now();
+    const deadlineMs = options.deadlineMs;
+    const warnAfterMs = options.warnAfterMs;
+    let warned = false;
+
     while (true) {
-      if (this.queue.length > 0) {
-        return this.queue.shift() as Buffer;
+      if (this.invalidated) throw new MessageStreamInvalidatedError();
+
+      const queued = this.takeQueued();
+      if (queued) return queued;
+
+      if (this.streamError) {
+        const error = this.streamError;
+        this.streamError = undefined;
+        throw error;
       }
 
-      if (this.error) {
-        const err = this.error;
-        this.error = undefined;
-        throw err;
+      if (this.ended) throw new Error('stream ended');
+
+      const elapsedMs = Date.now() - startedAt;
+      if (deadlineMs !== undefined && elapsedMs >= deadlineMs) {
+        const lateQueued = this.takeQueued();
+        if (lateQueued) return lateQueued;
+        throw new MessageReadTimeoutError(deadlineMs);
       }
 
-      if (this.ended) {
-        throw new Error('stream ended');
-      }
+      const waitMs = this.nextWaitMs(elapsedMs, deadlineMs, warnAfterMs, warned);
+      try {
+        await this.waitForData(waitMs);
+      } catch (error) {
+        if (this.invalidated) throw new MessageStreamInvalidatedError();
+        const arrived = this.takeQueued();
+        if (arrived) return arrived;
 
-      await this.waitForData(timeoutMs);
+        const elapsedAfterWait = Date.now() - startedAt;
+        if (deadlineMs !== undefined && elapsedAfterWait >= deadlineMs) {
+          throw new MessageReadTimeoutError(deadlineMs);
+        }
+        if (
+          error instanceof MessageReadTimeoutError
+          && deadlineMs !== undefined
+          && warnAfterMs !== undefined
+          && !warned
+        ) {
+          warned = true;
+          options.onSlow?.();
+          continue;
+        }
+        throw error;
+      }
     }
+  }
+
+  private nextWaitMs(
+    elapsedMs: number,
+    deadlineMs: number | undefined,
+    warnAfterMs: number | undefined,
+    warned: boolean,
+  ): number | undefined {
+    if (deadlineMs === undefined) return undefined;
+    const untilDeadline = Math.max(deadlineMs - elapsedMs, 0);
+    if (!warned && warnAfterMs !== undefined && elapsedMs < warnAfterMs) {
+      return Math.min(untilDeadline, warnAfterMs - elapsedMs);
+    }
+    return untilDeadline;
   }
 }

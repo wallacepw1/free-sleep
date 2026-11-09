@@ -1,5 +1,5 @@
 
-!function(){try{var e="undefined"!=typeof window?window:"undefined"!=typeof global?global:"undefined"!=typeof globalThis?globalThis:"undefined"!=typeof self?self:{},n=(new e.Error).stack;n&&(e._sentryDebugIds=e._sentryDebugIds||{},e._sentryDebugIds[n]="e44421d5-eeda-57a5-a7af-218b1e0f3436")}catch(e){}}();
+!function(){try{var e="undefined"!=typeof window?window:"undefined"!=typeof global?global:"undefined"!=typeof globalThis?globalThis:"undefined"!=typeof self?self:{},n=(new e.Error).stack;n&&(e._sentryDebugIds=e._sentryDebugIds||{},e._sentryDebugIds[n]="7ab53c90-88cc-5ef4-8bcd-c5bf5a926aae")}catch(e){}}();
 import { once } from 'events';
 import { unlink } from 'fs/promises';
 import { createServer } from 'net';
@@ -7,17 +7,18 @@ import logger from '../logger.js';
 export class UnixSocketServer {
     server;
     pendingConnections = [];
-    waiting;
+    waiter;
+    closed = false;
     constructor(server) {
         this.server = server;
         this.server.on('connection', (socket) => this.handleConnection(socket));
     }
     handleConnection(socket) {
         socket.on('error', (error) => logger.error({ error, message: 'Unix socket connection error' }));
-        if (this.waiting) {
-            const resolve = this.waiting;
-            this.waiting = undefined;
-            resolve(socket);
+        if (this.waiter) {
+            const waiter = this.waiter;
+            this.waiter = undefined;
+            waiter.resolve(socket);
             return;
         }
         while (this.pendingConnections.length > 0) {
@@ -26,19 +27,36 @@ export class UnixSocketServer {
         }
         this.pendingConnections.push(socket);
     }
+    /** Abandon the current accept without closing the listen socket or dropping a queued client. */
+    cancelWait() {
+        const waiter = this.waiter;
+        this.waiter = undefined;
+        waiter?.reject(new Error('Franken connection wait cancelled'));
+    }
     async close() {
-        this.waiting = undefined;
-        this.pendingConnections.splice(0).forEach(socket => socket.destroy());
+        if (this.closed)
+            return;
+        this.closed = true;
+        const waiter = this.waiter;
+        this.waiter = undefined;
+        waiter?.reject(new Error('Unix socket server closed'));
+        this.pendingConnections.splice(0).forEach((socket) => socket.destroy());
+        const listening = this.server.listening;
         this.server.close();
-        await once(this.server, 'close');
+        if (listening)
+            await once(this.server, 'close');
     }
     async waitForConnection() {
-        if (this.pendingConnections.length > 0) {
-            const connection = this.pendingConnections.shift();
-            return connection;
-        }
+        const pending = this.pendingConnections.shift();
+        if (pending)
+            return pending;
         logger.debug('Waiting for future connection');
-        return new Promise((resolve) => this.waiting = resolve);
+        return new Promise((resolve, reject) => {
+            if (this.waiter) {
+                this.waiter.reject(new Error('Franken connection wait replaced'));
+            }
+            this.waiter = { resolve, reject };
+        });
     }
     static async start(path) {
         logger.debug('Creating socket connection...');
@@ -54,12 +72,12 @@ export class UnixSocketServer {
         try {
             await unlink(path);
         }
-        catch (err) {
-            if (err?.code === 'ENOENT')
+        catch (error) {
+            if (error?.code === 'ENOENT')
                 return;
-            throw err;
+            throw error;
         }
     }
 }
 //# sourceMappingURL=unixSocketServer.js.map
-//# debugId=e44421d5-eeda-57a5-a7af-218b1e0f3436
+//# debugId=7ab53c90-88cc-5ef4-8bcd-c5bf5a926aae

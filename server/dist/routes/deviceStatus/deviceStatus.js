@@ -1,14 +1,13 @@
 
-!function(){try{var e="undefined"!=typeof window?window:"undefined"!=typeof global?global:"undefined"!=typeof globalThis?globalThis:"undefined"!=typeof self?self:{},n=(new e.Error).stack;n&&(e._sentryDebugIds=e._sentryDebugIds||{},e._sentryDebugIds[n]="c59d26f9-4413-5fdd-94eb-c600e7ad764e")}catch(e){}}();
+!function(){try{var e="undefined"!=typeof window?window:"undefined"!=typeof global?global:"undefined"!=typeof globalThis?globalThis:"undefined"!=typeof self?self:{},n=(new e.Error).stack;n&&(e._sentryDebugIds=e._sentryDebugIds||{},e._sentryDebugIds[n]="f257a581-4384-52be-9319-321487e3c096")}catch(e){}}();
 import express from 'express';
-import { connectFranken } from '../../8sleep/frankenServer.js';
+import { callFranken } from '../../8sleep/frankenServer.js';
 import { DeviceStatusSchema } from './deviceStatusSchema.js';
 import logger from '../../logger.js';
 import { updateDeviceStatus } from './updateDeviceStatus.js';
 const router = express.Router();
 router.get('/deviceStatus', async (req, res) => {
-    const franken = await connectFranken();
-    const resp = await franken.getDeviceStatus();
+    const resp = await callFranken((franken) => franken.getDeviceStatus());
     res.json(resp);
 });
 router.post('/deviceStatus', async (req, res) => {
@@ -27,4 +26,4 @@ router.post('/deviceStatus', async (req, res) => {
 });
 export default router;
 //# sourceMappingURL=deviceStatus.js.map
-//# debugId=c59d26f9-4413-5fdd-94eb-c600e7ad764e
+//# debugId=f257a581-4384-52be-9319-321487e3c096

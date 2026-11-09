@@ -1,5 +1,5 @@
 import _ from 'lodash';
-import { connectFranken } from './frankenServer.js';
+import { callFranken } from './frankenServer.js';
 import logger from '../logger.js';
 
 
@@ -32,14 +32,9 @@ export type FrankenCommand = keyof typeof frankenCommands;
 
 export async function executeFunction(command: FrankenCommand, arg = 'empty'): Promise<void> {
   logger.debug(`Executing command | command: ${command} | arg: ${arg}`);
-
-  const franken = await connectFranken();
-  // const frankenCommand = funcNameToFrankenCommand[name];
-  // if franken disconnects right before a function call this will throw
-  // the error will bubble up to the main loop of the device-api-client (protocol handling)
-  // and the client will crash disconnecting from device-api - this is safe, it's correctly cleaned-up,
-  // deviceApiLoop will take care of reconnecting to device-api
-  const response = await franken.callFunction(command, arg);
+  // Retry only when this command was not written. A timeout means the write may
+  // already have reached the device, and a resent command would have no reply id.
+  const response = await callFranken((franken) => franken.callFunction(command, arg));
   logger.debug(response);
 
   return response;
