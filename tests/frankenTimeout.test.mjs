@@ -29,6 +29,7 @@ const fastTiming = {
   slowReplyWarnMs: 30,
   responseDeadlineMs: 80,
   responseDelayMs: 0,
+  lateFrameDrainMs: 30,
   connectionTimeoutMs: 400,
   connectionMaxAttempts: 4,
 };
@@ -289,6 +290,7 @@ test('simulated only: 20475ms is past the 10s deadline and is not delivered', as
   const connection = new FrankenConnection(sockPath, {
     ...fastTiming,
     responseDeadlineMs: 50,
+    lateFrameDrainMs: 80,
   });
   let peerSocket;
   try {
@@ -296,41 +298,48 @@ test('simulated only: 20475ms is past the 10s deadline and is not delivered', as
     peerSocket = await connectPeer(sockPath);
     const peer = new FramePeer(peerSocket, (request, current) => {
       if (request.startsWith('10\n')) {
-        setTimeout(() => current.reply('SIMULATED-20475'), 103);
+        setTimeout(() => current.reply('SIMULATED-20475'), 80);
+        return;
       }
+      current.reply(`OK:${request}`);
     });
     const franken = await pending;
     const right = franken.sendMessage('10\n43200');
     const left = franken.sendMessage('9\n43200');
     await assert.rejects(right, (error) => error instanceof MessageReadTimeoutError);
-    await assert.rejects(left, assertUnsent);
-    assert.deepEqual(peer.requests, ['10\n43200']);
-    assert.equal(franken.isClosed, true);
+    assert.equal(await left, 'OK:9\n43200');
+    assert.deepEqual(peer.requests, ['10\n43200', '9\n43200']);
+    assert.equal(franken.isClosed, false);
   } finally {
     await connection.disconnect();
     peerSocket?.destroy();
   }
 });
 
-test('a missing reply invalidates the socket before the queued command is written', async () => {
+test('a missed reply keeps the client socket and does not pair a late frame with the next command', async () => {
   const sockPath = join(dataFolder, 'missing.sock');
-  const connection = new FrankenConnection(sockPath, fastTiming);
+  const connection = new FrankenConnection(sockPath, {
+    ...fastTiming,
+    lateFrameDrainMs: 60,
+  });
   let peerSocket;
   try {
     const { pending } = await listen(connection);
     peerSocket = await connectPeer(sockPath);
-    const peer = new FramePeer(peerSocket, () => {});
+    const peer = new FramePeer(peerSocket, (request, current) => {
+      if (request === '14') return;
+      current.reply(`OK:${request}`);
+    });
     const franken = await pending;
     const inode = statSync(sockPath).ino;
     const first = franken.sendMessage('14');
     const second = franken.sendMessage('10\n43200');
     await assert.rejects(first, (error) => error instanceof MessageReadTimeoutError);
-    await assert.rejects(second, assertUnsent);
-    assert.deepEqual(peer.requests, ['14']);
-    assert.equal(franken.isClosed, true);
-    assert.equal(statSync(sockPath).ino, inode);
     if (!peerSocket.destroyed) peerSocket.write('LATE14\n\n');
-    await delay(15);
+    assert.equal(await second, 'OK:10\n43200');
+    assert.deepEqual(peer.requests, ['14', '10\n43200']);
+    assert.equal(franken.isClosed, false);
+    assert.equal(statSync(sockPath).ino, inode);
   } finally {
     await connection.disconnect();
     peerSocket?.destroy();

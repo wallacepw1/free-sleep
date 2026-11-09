@@ -1,5 +1,5 @@
 
-!function(){try{var e="undefined"!=typeof window?window:"undefined"!=typeof global?global:"undefined"!=typeof globalThis?globalThis:"undefined"!=typeof self?self:{},n=(new e.Error).stack;n&&(e._sentryDebugIds=e._sentryDebugIds||{},e._sentryDebugIds[n]="4eb13fe8-d439-5c69-980e-83e4fab68588")}catch(e){}}();
+!function(){try{var e="undefined"!=typeof window?window:"undefined"!=typeof global?global:"undefined"!=typeof globalThis?globalThis:"undefined"!=typeof self?self:{},n=(new e.Error).stack;n&&(e._sentryDebugIds=e._sentryDebugIds||{},e._sentryDebugIds[n]="b5c17ee4-e8d3-553e-a9a8-1e75069bc9a0")}catch(e){}}();
 import { SequentialQueue } from './sequentialQueue.js';
 import { MessageReadTimeoutError, MessageStream } from './messageStream.js';
 import { frankenCommands } from './deviceApi.js';
@@ -22,6 +22,8 @@ export const FRANKEN_RESPONSE_DEADLINE_DEFAULT_MS = 20_000;
 export const FRANKEN_RESPONSE_DEADLINE_MAX_MS = 30_000;
 /** API calls fail here if no client is connected, instead of holding the HTTP response open. */
 export const FRANKEN_REQUEST_CONNECT_BUDGET_MS = 15_000;
+/** After a missed reply, ignore a late frame that arrives before the next write. */
+export const FRANKEN_LATE_FRAME_DRAIN_MS = 250;
 const FRANKEN_RESPONSE_DELAY_MS = 10;
 const FRANKEN_CONNECTION_TIMEOUT_MS = 25_000;
 const FRANKEN_CONNECTION_MAX_ATTEMPTS = 10;
@@ -38,6 +40,7 @@ export const DEFAULT_FRANKEN_TIMING = {
     slowReplyWarnMs: FRANKEN_SLOW_REPLY_WARN_MS,
     responseDeadlineMs: resolveResponseDeadlineMs(),
     responseDelayMs: FRANKEN_RESPONSE_DELAY_MS,
+    lateFrameDrainMs: FRANKEN_LATE_FRAME_DRAIN_MS,
     connectionTimeoutMs: FRANKEN_CONNECTION_TIMEOUT_MS,
     connectionMaxAttempts: FRANKEN_CONNECTION_MAX_ATTEMPTS,
 };
@@ -90,6 +93,7 @@ export class Franken {
     timing;
     onInvalidated;
     failed = false;
+    needsDrain = false;
     /**
      * Runs after the writable check and before socket.write.
      * Tests use it to destroy the socket in that gap.
@@ -118,6 +122,7 @@ export class Franken {
                 throw new FrankenSocketClosedError();
             const requestBytes = Buffer.concat([Buffer.from(message), Franken.separator]);
             try {
+                await this.discardLateReplyIfNeeded();
                 await this.write(requestBytes);
             }
             catch (error) {
@@ -159,13 +164,30 @@ export class Franken {
             return response;
         }
         catch (error) {
+            if (error instanceof MessageReadTimeoutError) {
+                // The 8:58 PM measurement waited 20s and never logged a late match.
+                // Closing the client was followed by 3–4 minutes with no reconnect.
+                // Frank is the client of this listen socket; dropping it makes frank
+                // restart sensor/frozen recovery. Keep the session and resync later.
+                this.needsDrain = true;
+                logger.warn(`Missed Franken reply after ${this.timing.responseDeadlineMs}ms. `
+                    + `Keeping the client socket. message: ${message}`);
+                throw error;
+            }
             if (!(error instanceof FrankenSocketClosedError)) {
-                const reason = error instanceof MessageReadTimeoutError
-                    ? `Timed out waiting for Franken response after ${this.timing.responseDeadlineMs}ms. message: ${message}`
-                    : 'Franken socket failed before the outstanding reply was read';
-                this.invalidate(reason);
+                this.invalidate('Franken socket failed before the outstanding reply was read');
             }
             throw error;
+        }
+    }
+    /** Drop a frame that belongs to a missed command before the next write. */
+    async discardLateReplyIfNeeded() {
+        if (!this.needsDrain)
+            return;
+        this.needsDrain = false;
+        const discarded = await this.messageStream.discardLateFrames(this.timing.lateFrameDrainMs, this.timing.lateFrameDrainMs);
+        if (discarded > 0) {
+            logger.warn(`Discarded ${discarded} late Franken frame(s) before the next command.`);
         }
     }
     /** Destroy the client socket and discard any frame that arrives after this command. */
@@ -458,4 +480,4 @@ export async function disconnectFranken() {
     await defaultConnection.disconnect();
 }
 //# sourceMappingURL=frankenServer.js.map
-//# debugId=4eb13fe8-d439-5c69-980e-83e4fab68588
+//# debugId=b5c17ee4-e8d3-553e-a9a8-1e75069bc9a0

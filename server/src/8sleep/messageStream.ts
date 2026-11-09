@@ -62,6 +62,36 @@ export class MessageStream {
     this.queue.length = 0;
   }
 
+  /**
+   * Drop complete frames already buffered and any frame that arrives before
+   * `quietMs` of silence, up to `maxMs`. Used after a missed reply so a late
+   * frame is not read as the next command. The socket stays open.
+   */
+  public async discardLateFrames(quietMs: number, maxMs: number): Promise<number> {
+    const startedAt = Date.now();
+    let discarded = 0;
+    while (this.queue.length > 0 && !this.invalidated) {
+      this.queue.shift();
+      discarded += 1;
+    }
+    while (!this.invalidated && Date.now() - startedAt < maxMs) {
+      const elapsedMs = Date.now() - startedAt;
+      const sliceMs = Math.min(quietMs, maxMs - elapsedMs);
+      if (sliceMs <= 0) break;
+      try {
+        await this.waitForData(sliceMs);
+      } catch (error) {
+        if (error instanceof MessageReadTimeoutError) break;
+        throw error;
+      }
+      while (this.queue.length > 0 && !this.invalidated) {
+        this.queue.shift();
+        discarded += 1;
+      }
+    }
+    return discarded;
+  }
+
   private takeQueued(): Buffer | undefined {
     if (this.invalidated) return undefined;
     return this.queue.shift();

@@ -1,5 +1,5 @@
 
-!function(){try{var e="undefined"!=typeof window?window:"undefined"!=typeof global?global:"undefined"!=typeof globalThis?globalThis:"undefined"!=typeof self?self:{},n=(new e.Error).stack;n&&(e._sentryDebugIds=e._sentryDebugIds||{},e._sentryDebugIds[n]="4122a957-0f2f-50c5-8d85-360f84e603dd")}catch(e){}}();
+!function(){try{var e="undefined"!=typeof window?window:"undefined"!=typeof global?global:"undefined"!=typeof globalThis?globalThis:"undefined"!=typeof self?self:{},n=(new e.Error).stack;n&&(e._sentryDebugIds=e._sentryDebugIds||{},e._sentryDebugIds[n]="03bebeb4-b0cd-5658-8144-9d16b4f51712")}catch(e){}}();
 import { once } from 'events';
 import binarySplit from 'binary-split';
 export class MessageReadTimeoutError extends Error {
@@ -47,6 +47,38 @@ export class MessageStream {
     invalidate() {
         this.invalidated = true;
         this.queue.length = 0;
+    }
+    /**
+     * Drop complete frames already buffered and any frame that arrives before
+     * `quietMs` of silence, up to `maxMs`. Used after a missed reply so a late
+     * frame is not read as the next command. The socket stays open.
+     */
+    async discardLateFrames(quietMs, maxMs) {
+        const startedAt = Date.now();
+        let discarded = 0;
+        while (this.queue.length > 0 && !this.invalidated) {
+            this.queue.shift();
+            discarded += 1;
+        }
+        while (!this.invalidated && Date.now() - startedAt < maxMs) {
+            const elapsedMs = Date.now() - startedAt;
+            const sliceMs = Math.min(quietMs, maxMs - elapsedMs);
+            if (sliceMs <= 0)
+                break;
+            try {
+                await this.waitForData(sliceMs);
+            }
+            catch (error) {
+                if (error instanceof MessageReadTimeoutError)
+                    break;
+                throw error;
+            }
+            while (this.queue.length > 0 && !this.invalidated) {
+                this.queue.shift();
+                discarded += 1;
+            }
+        }
+        return discarded;
     }
     takeQueued() {
         if (this.invalidated)
@@ -152,4 +184,4 @@ export class MessageStream {
     }
 }
 //# sourceMappingURL=messageStream.js.map
-//# debugId=4122a957-0f2f-50c5-8d85-360f84e603dd
+//# debugId=03bebeb4-b0cd-5658-8144-9d16b4f51712

@@ -25,6 +25,8 @@ export const FRANKEN_RESPONSE_DEADLINE_DEFAULT_MS = 20_000;
 export const FRANKEN_RESPONSE_DEADLINE_MAX_MS = 30_000;
 /** API calls fail here if no client is connected, instead of holding the HTTP response open. */
 export const FRANKEN_REQUEST_CONNECT_BUDGET_MS = 15_000;
+/** After a missed reply, ignore a late frame that arrives before the next write. */
+export const FRANKEN_LATE_FRAME_DRAIN_MS = 250;
 const FRANKEN_RESPONSE_DELAY_MS = 10;
 const FRANKEN_CONNECTION_TIMEOUT_MS = 25_000;
 const FRANKEN_CONNECTION_MAX_ATTEMPTS = 10;
@@ -41,6 +43,7 @@ export interface FrankenTiming {
   slowReplyWarnMs: number;
   responseDeadlineMs: number;
   responseDelayMs: number;
+  lateFrameDrainMs: number;
   connectionTimeoutMs: number;
   connectionMaxAttempts: number;
 }
@@ -49,6 +52,7 @@ export const DEFAULT_FRANKEN_TIMING: FrankenTiming = {
   slowReplyWarnMs: FRANKEN_SLOW_REPLY_WARN_MS,
   responseDeadlineMs: resolveResponseDeadlineMs(),
   responseDelayMs: FRANKEN_RESPONSE_DELAY_MS,
+  lateFrameDrainMs: FRANKEN_LATE_FRAME_DRAIN_MS,
   connectionTimeoutMs: FRANKEN_CONNECTION_TIMEOUT_MS,
   connectionMaxAttempts: FRANKEN_CONNECTION_MAX_ATTEMPTS,
 };
@@ -105,6 +109,7 @@ export class FrankenConnectCancelledError extends Error {
 
 export class Franken {
   private failed = false;
+  private needsDrain = false;
 
   /**
    * Runs after the writable check and before socket.write.
@@ -138,6 +143,7 @@ export class Franken {
 
       const requestBytes = Buffer.concat([Buffer.from(message), Franken.separator]);
       try {
+        await this.discardLateReplyIfNeeded();
         await this.write(requestBytes);
       } catch (error) {
         this.invalidate('Franken socket write failed before a reply was read');
@@ -185,13 +191,35 @@ export class Franken {
       }
       return response;
     } catch (error) {
+      if (error instanceof MessageReadTimeoutError) {
+        // The 8:58 PM measurement waited 20s and never logged a late match.
+        // Closing the client was followed by 3–4 minutes with no reconnect.
+        // Frank is the client of this listen socket; dropping it makes frank
+        // restart sensor/frozen recovery. Keep the session and resync later.
+        this.needsDrain = true;
+        logger.warn(
+          `Missed Franken reply after ${this.timing.responseDeadlineMs}ms. `
+          + `Keeping the client socket. message: ${message}`,
+        );
+        throw error;
+      }
       if (!(error instanceof FrankenSocketClosedError)) {
-        const reason = error instanceof MessageReadTimeoutError
-          ? `Timed out waiting for Franken response after ${this.timing.responseDeadlineMs}ms. message: ${message}`
-          : 'Franken socket failed before the outstanding reply was read';
-        this.invalidate(reason);
+        this.invalidate('Franken socket failed before the outstanding reply was read');
       }
       throw error;
+    }
+  }
+
+  /** Drop a frame that belongs to a missed command before the next write. */
+  private async discardLateReplyIfNeeded(): Promise<void> {
+    if (!this.needsDrain) return;
+    this.needsDrain = false;
+    const discarded = await this.messageStream.discardLateFrames(
+      this.timing.lateFrameDrainMs,
+      this.timing.lateFrameDrainMs,
+    );
+    if (discarded > 0) {
+      logger.warn(`Discarded ${discarded} late Franken frame(s) before the next command.`);
     }
   }
 
