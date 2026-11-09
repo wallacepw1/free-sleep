@@ -1,7 +1,7 @@
 
-!function(){try{var e="undefined"!=typeof window?window:"undefined"!=typeof global?global:"undefined"!=typeof globalThis?globalThis:"undefined"!=typeof self?self:{},n=(new e.Error).stack;n&&(e._sentryDebugIds=e._sentryDebugIds||{},e._sentryDebugIds[n]="76488c38-e4a2-508b-93c3-6f918049d257")}catch(e){}}();
+!function(){try{var e="undefined"!=typeof window?window:"undefined"!=typeof global?global:"undefined"!=typeof globalThis?globalThis:"undefined"!=typeof self?self:{},n=(new e.Error).stack;n&&(e._sentryDebugIds=e._sentryDebugIds||{},e._sentryDebugIds[n]="6bbda9fe-4ede-51c0-8cae-2f5623cce23a")}catch(e){}}();
 import _ from 'lodash';
-import { connectFranken } from './frankenServer.js';
+import { callFranken } from './frankenServer.js';
 import logger from '../logger.js';
 export const frankenCommands = {
     HELLO: '0',
@@ -26,15 +26,11 @@ export const frankenCommands = {
 export const invertedFrankenCommands = _.invert(frankenCommands);
 export async function executeFunction(command, arg = 'empty') {
     logger.debug(`Executing command | command: ${command} | arg: ${arg}`);
-    const franken = await connectFranken();
-    // const frankenCommand = funcNameToFrankenCommand[name];
-    // if franken disconnects right before a function call this will throw
-    // the error will bubble up to the main loop of the device-api-client (protocol handling)
-    // and the client will crash disconnecting from device-api - this is safe, it's correctly cleaned-up,
-    // deviceApiLoop will take care of reconnecting to device-api
-    const response = await franken.callFunction(command, arg);
+    // Retry only when this command was not written. A timeout means the write may
+    // already have reached the device, and a resent command would have no reply id.
+    const response = await callFranken((franken) => franken.callFunction(command, arg));
     logger.debug(response);
     return response;
 }
 //# sourceMappingURL=deviceApi.js.map
-//# debugId=76488c38-e4a2-508b-93c3-6f918049d257
+//# debugId=6bbda9fe-4ede-51c0-8cae-2f5623cce23a

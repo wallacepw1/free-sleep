@@ -2,8 +2,9 @@ import './instrument.js';
 import express from 'express';
 import schedule from 'node-schedule';
 import { Server } from 'http';
+import moment from 'moment-timezone';
 import logger from './logger.js';
-import { connectFranken, disconnectFranken } from './8sleep/frankenServer.js';
+import { connectFranken, disconnectFranken, setFrankenLinkListener } from './8sleep/frankenServer.js';
 import { FrankenMonitor } from './8sleep/frankenMonitor.js';
 import './jobs/jobScheduler.js';
 
@@ -118,9 +119,18 @@ async function startServer() {
 
   // Initialize Franken once before listening
   if (!config.remoteDevMode) {
+    setFrankenLinkListener((state, message) => {
+      serverStatus.status.franken.status = state;
+      serverStatus.status.franken.message = message;
+      serverStatus.status.franken.timestamp = moment.tz().format();
+    });
     void initFranken()
-      .then(() => {
-        setupSentryTags();
+      .then(async () => {
+        try {
+          await setupSentryTags();
+        } catch (error) {
+          logger.error(error);
+        }
         initFrankenMonitor();
       })
       .catch(error => {

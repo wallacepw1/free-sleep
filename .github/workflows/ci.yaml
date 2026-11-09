@@ -57,6 +57,10 @@ jobs:
         working-directory: server
         run: npm run generate
 
+      - name: Test Franken reply association
+        working-directory: server
+        run: TS_NODE_PROJECT=tsconfig.json node --test-concurrency=1 --loader ts-node/esm --test ../tests/frankenTimeout.test.mjs
+
       - name: Build (server)
         working-directory: server
         run: npm run build:pr

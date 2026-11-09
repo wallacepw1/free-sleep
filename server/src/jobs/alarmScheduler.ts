@@ -10,7 +10,7 @@ import settingsDB from '../db/settings.js';
 import { AlarmJob, DailySchedule, DayOfWeek, Side } from '../db/schedulesSchema.js';
 import { executeFunction } from '../8sleep/deviceApi.js';
 import { getDayIndexForSchedule, logJob } from './utils.js';
-import { connectFranken } from '../8sleep/frankenServer.js';
+import { callFranken } from '../8sleep/frankenServer.js';
 import { Settings } from '../db/settingsSchema.js';
 
 
@@ -27,8 +27,7 @@ export const executeAlarm = async ({ vibrationIntensity, duration, vibrationPatt
     }
 
     // Exit if side is off
-    const franken = await connectFranken();
-    const resp = await franken.getDeviceStatus();
+    const resp = await callFranken((franken) => franken.getDeviceStatus());
     if (!resp[side].isOn && !force) {
       logger.debug('Not executing alarm, side is off!');
       return;

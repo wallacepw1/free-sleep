@@ -1,10 +1,11 @@
 
-!function(){try{var e="undefined"!=typeof window?window:"undefined"!=typeof global?global:"undefined"!=typeof globalThis?globalThis:"undefined"!=typeof self?self:{},n=(new e.Error).stack;n&&(e._sentryDebugIds=e._sentryDebugIds||{},e._sentryDebugIds[n]="29364e05-57b8-52f6-89dd-72009ad15e54")}catch(e){}}();
+!function(){try{var e="undefined"!=typeof window?window:"undefined"!=typeof global?global:"undefined"!=typeof globalThis?globalThis:"undefined"!=typeof self?self:{},n=(new e.Error).stack;n&&(e._sentryDebugIds=e._sentryDebugIds||{},e._sentryDebugIds[n]="fae6b48d-7c8d-54cd-a627-e89ff3aa6378")}catch(e){}}();
 import './instrument.js';
 import express from 'express';
 import schedule from 'node-schedule';
+import moment from 'moment-timezone';
 import logger from './logger.js';
-import { connectFranken, disconnectFranken } from './8sleep/frankenServer.js';
+import { connectFranken, disconnectFranken, setFrankenLinkListener } from './8sleep/frankenServer.js';
 import { FrankenMonitor } from './8sleep/frankenMonitor.js';
 import './jobs/jobScheduler.js';
 // Setup code
@@ -105,9 +106,19 @@ async function startServer() {
     serverStatus.status.logger.status = 'healthy';
     // Initialize Franken once before listening
     if (!config.remoteDevMode) {
+        setFrankenLinkListener((state, message) => {
+            serverStatus.status.franken.status = state;
+            serverStatus.status.franken.message = message;
+            serverStatus.status.franken.timestamp = moment.tz().format();
+        });
         void initFranken()
-            .then(() => {
-            setupSentryTags();
+            .then(async () => {
+            try {
+                await setupSentryTags();
+            }
+            catch (error) {
+                logger.error(error);
+            }
             initFrankenMonitor();
         })
             .catch(error => {
@@ -139,4 +150,4 @@ startServer().catch((err) => {
     process.exit(1);
 });
 //# sourceMappingURL=server.js.map
-//# debugId=29364e05-57b8-52f6-89dd-72009ad15e54
+//# debugId=fae6b48d-7c8d-54cd-a627-e89ff3aa6378

@@ -1,9 +1,9 @@
 
-!function(){try{var e="undefined"!=typeof window?window:"undefined"!=typeof global?global:"undefined"!=typeof globalThis?globalThis:"undefined"!=typeof self?self:{},n=(new e.Error).stack;n&&(e._sentryDebugIds=e._sentryDebugIds||{},e._sentryDebugIds[n]="47fc4c11-6646-58e2-929a-2106c66b743f")}catch(e){}}();
+!function(){try{var e="undefined"!=typeof window?window:"undefined"!=typeof global?global:"undefined"!=typeof globalThis?globalThis:"undefined"!=typeof self?self:{},n=(new e.Error).stack;n&&(e._sentryDebugIds=e._sentryDebugIds||{},e._sentryDebugIds[n]="ab2728b7-0c1d-5dc5-b771-c53ce2957a19")}catch(e){}}();
 import moment from 'moment-timezone';
 import logger from '../logger.js';
 import settingsDB from '../db/settings.js';
-import { connectFranken } from './frankenServer.js';
+import { callFranken } from './frankenServer.js';
 import { wait } from './promises.js';
 import { Version } from '../routes/deviceStatus/deviceStatusSchema.js';
 import { GestureSchema } from '../db/settingsSchema.js';
@@ -76,30 +76,37 @@ export class FrankenMonitor {
         this.processGesturesForSide(nextDeviceStatus, 'right');
     }
     async frankenLoop() {
-        const franken = await connectFranken();
-        this.deviceStatus = await franken.getDeviceStatus(false);
-        let hasGestures = this.deviceStatus.coverVersion !== Version.Pod3;
-        let waitTime = hasGestures ? 2_000 : 60_000;
-        if (hasGestures) {
-            this.deviceStatus = await franken.getDeviceStatus(true);
-            logger.debug(`Gestures supported for ${this.deviceStatus.coverVersion}`);
-        }
-        else {
-            logger.debug(`Gestures not supported for ${this.deviceStatus.coverVersion}`);
-        }
-        // No point in querying device status every 3 seconds for checking the prime status...
+        // A failed first poll used to reject this loop forever. Keep scheduling the
+        // same Pod 3 / gesture reads and let the next pass reconnect.
         while (this.isRunning) {
+            let waitTime = 60_000;
             try {
-                while (this.isRunning) {
-                    hasGestures = this.deviceStatus.coverVersion !== Version.Pod3;
-                    waitTime = hasGestures ? 2_000 : 60_000;
+                if (!this.deviceStatus) {
+                    const initialStatus = await callFranken((session) => session.getDeviceStatus(false));
+                    // Pod 3 is the identified cover without side taps, so it uses the slow poll.
+                    // Any other string, including "Version not found", keeps gesture reads.
+                    // This hub's beta cover has taps and must not be relabeled or slowed as Pod 3.
+                    const gesturesSupported = initialStatus.coverVersion !== Version.Pod3;
+                    waitTime = gesturesSupported ? 2_000 : 60_000;
+                    if (gesturesSupported) {
+                        const gesturedStatus = await callFranken((session) => session.getDeviceStatus(true));
+                        this.deviceStatus = gesturedStatus;
+                        logger.debug(`Gestures supported for ${gesturedStatus.coverVersion}`);
+                    }
+                    else {
+                        this.deviceStatus = initialStatus;
+                        logger.debug(`Gestures not supported for ${this.deviceStatus.coverVersion}`);
+                    }
+                }
+                while (this.isRunning && this.deviceStatus) {
+                    const gesturesSupported = this.deviceStatus.coverVersion !== Version.Pod3;
+                    waitTime = gesturesSupported ? 2_000 : 60_000;
                     await wait(waitTime);
-                    if (!this.isRunning)
+                    if (!this.isRunning || !this.deviceStatus)
                         break;
-                    const franken = await connectFranken();
-                    const nextDeviceStatus = await franken.getDeviceStatus(hasGestures);
+                    const nextDeviceStatus = await callFranken((session) => session.getDeviceStatus(gesturesSupported));
                     await settingsDB.read();
-                    if (hasGestures) {
+                    if (gesturesSupported) {
                         this.processGestures(nextDeviceStatus);
                     }
                     this.deviceStatus = nextDeviceStatus;
@@ -120,4 +127,4 @@ export class FrankenMonitor {
     }
 }
 //# sourceMappingURL=frankenMonitor.js.map
-//# debugId=47fc4c11-6646-58e2-929a-2106c66b743f
+//# debugId=ab2728b7-0c1d-5dc5-b771-c53ce2957a19
